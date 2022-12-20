@@ -1,0 +1,253 @@
+---
+title: "Math 22 Final Project"
+output: html_notebook
+---
+
+# Description
+
+Pain is the most ubiquitous and economically burdensome condition in the world. For this reason, pain relief—a decrease in pain over time—is the primary outcome for clinical trials across many fields, ranging from pharmaceuticals to physiotherapy. Often measured at few, discrete-time points (e.g., pre-and post-intervention), measures and statistical models of pain relief are poor. In our project, we propose a Discrete-Time Markov Model in order to obtain a steady-state approximation of the "end behavior" of a patient's pain trajectory. Using this model, corresponding analyses of pain trajectory, particularly those of analgesic clinical trials, will account for more variance, and  clinicians and pain researchers can offer more predictive and critical insight into patient's subsequent pain conditions.
+
+## Methodology
+
+To demonstrate the prognostic ability of the Markov chain, we fit a Markov chain to each individual subject and obtained a corresponding steady-state vector. As proposed in Section 3, our Markov model will consist of 11 states, with each successive state mapping to a corresponding pain level, zero through ten (zero being no pain and ten being excruciating pain). We then find the corresponding steady-state vector.
+
+We use this vector to produce an estimate of the patient's overall change in pain by subtracting the patient's starting pain from a weighted average of the components of the steady vector ("ending pain" - start pain, similar to how the standard change-in-pain metric is calculated), with the corresponding ordinal values for the states as weights.
+
+## The Experiment
+
+To test for whether our metric actually predictive of future changes in pain or not, we implemented a two step process for 17 subsets of the data, comparing our experimental metric to the standard change in pain metric (last pain-rating minus first pain-rating). We used 17 subsets of the total pain sequence (10% to 90%, with 5% increments), where a percentage of the sequence, from the first point to that point in the sequence, to calculate our metrics. This is the process we used for the obtained sequences:
+1. For n% of the points within a patient's trajectory, we calculate both our estimate of the patient's overall in change in pain by utilizing a Markov model and the standard change-in-pain metric (based simply on the difference between final and initial pain) from the starting point to the n% mark.
+2. Then, we calculate the standard change-in-pain metric for the TOTAL sequence.
+
+With these predictions, we calculated and plot the root mean-squared errors (RMSE) of the predictions for evaluation of the metrics' prognostic ability by each of the n% values; the purpose of this is to compare how predictive our experimental metric is vs. the standard metric with n% of the data to use for calculations. As the RMSE denotes the difference between the observed and expected value, ideally, our experimental metric will have a lower RMSE than the standard change-in-pain metric, thus indicating a better prediction.
+
+ R was utilized to fit models, and its implementation is depicted in Appendix A.1. The evaluation of the metrics/generation of the RMSE plot is included in Appendix A.2. The "markovchain", "ggplot2", "patchwork", "Metrics", and "tidyverse" packages were used in the implementation of this code.
+
+
+Packages
+```{r}
+library(ggplot2)
+library(Metrics)
+library(markovchain)
+library(tidyverse)
+library(patchwork)
+
+```
+
+Data processing
+```{r}
+ get_pl2 <- function(){
+    ratings_pl2 <- read.csv("placeboII_ratings.csv", strip.white = TRUE, stringsAsFactors = FALSE)
+
+    pain_pl2<-c()
+    pain_pl2 <- (sapply(unique(ratings_pl2$subject), function(sub) {
+      tmp = subset(ratings_pl2, subject == sub)
+      tmp <- na.omit(tmp)
+      
+      if(sum(as.numeric(tmp$phase == 1)) > 0){
+            cbind(subject = sub,
+                  time = tmp$day,
+                  pain = tmp$pain) 
+      }
+    }))
+    pain_pl2 <- do.call(rbind, pain_pl2)
+    pain_pl2 <- na.omit(pain_pl2)
+    pain_pl2 <- as.data.frame(pain_pl2)
+    colnames(pain_pl2) <- c("subject","time", "pain")
+    
+    return(pain_pl2)
+  }
+  
+  get_ldopa <- function(){
+    ratings_ldopa <- read.csv("ldopa_ratings.csv", strip.white = TRUE, stringsAsFactors = FALSE)
+    ratings_ldopa <- na.omit(ratings_ldopa)
+    
+    pain_ldopa <- (lapply(unique(ratings_ldopa$id), function(sub) {
+      tmp = subset(ratings_ldopa, sub == id)
+      tmp <- na.omit(tmp)
+      
+      start <- as.numeric(as.POSIXct(tmp[1,4], format="%d-%b-%Y"))
+      
+      cbind(
+        subject = sub,
+        time = (as.numeric(as.POSIXct(tmp[,4], format="%d-%b-%Y")) - start)/86400,
+        pain = tmp$pain
+      ) 
+  
+      
+    }))
+  
+    pain_ldopa <- do.call(rbind, pain_ldopa)
+    pain_ldopa <- na.omit(pain_ldopa)
+    pain_ldopa <- as.data.frame(pain_ldopa)
+    colnames(pain_ldopa) <- c("subject", "time", "pain") 
+    
+    return(pain_ldopa)
+  }
+  
+  softmax <- function(x) {x / sum(x)}
+  
+  pain_pl2 <- get_pl2()
+  pain_ldopa <- get_ldopa()
+
+
+```
+
+
+## Single-subject time course
+
+```{r} 
+sub = "SAT009"
+
+#extract sequence of pain ratings from subject
+sequence <- round(as.numeric(subset(pain_ldopa, subject == sub)$pain), digits = 0)
+
+#fit markov model
+mcFitMLE <- markovchainFit(data = sequence)
+
+transition_matrix <- mcFitMLE[["estimate"]]@transitionMatrix
+
+#round to two digits for demonstration
+round(transition_matrix, digits = 2)
+
+
+```
+
+```{r}
+
+#obtain steady state vector
+#left eigenspace decomposition (requires transpose)
+#extract real value and scale to components to sum to 1 due to floating errors
+eigenvector <- softmax(abs(Re(eigen(t(transition_matrix))[["vectors"]][,1])))
+
+round(eigenvector, digits=2)
+
+```
+
+
+```{r}
+
+end_behavior <- (as.numeric(rownames(transition_matrix)) %*% eigenvector)
+
+end_behavior
+
+metric <- sequence[1] - end_behavior
+
+metric
+
+
+```
+
+
+## Experiment
+
+Compute experimental and standard change in pain metrics along with additional datapoints for single pain study with parametrized percentage of sequence
+```{r}
+
+ change_in_pain <- function(pain, n){
+  
+   #iterate through subjects to return matrix of scores
+  scores <- sapply(unique(pain$subject), function(sub) {
+    
+    #extract sequence of pain ratings from subject
+    full_sequence <- round(as.numeric(subset(pain, subject == sub)$pain), digits = 0)
+     
+    #calculate len of n% of sequence
+    len <- round(n*length(full_sequence), digits = 0)
+    
+    #n% of sequence
+    sequence <- full_sequence[1:len]
+       
+    #fit markov model
+    transition_matrix <- markovchainFit(data = sequence)[["estimate"]]@transitionMatrix
+    
+    #obtain steady state vector
+    #left eigenspace decomposition (requires transpose)
+    #extract real value and scale to components to sum to 1 due to floating errors
+    eigenvector <- softmax(abs(Re(eigen(t(transition_matrix))[["vectors"]][,1])))
+    
+    #calculate metrics
+    data.frame(subject = sub,
+      #post - pre
+      metric_tot = full_sequence[length(full_sequence)] - full_sequence[1],
+      #end = weighted average of all possible pain values
+      metric_exp = (as.numeric(colnames(transition_matrix)) %*% eigenvector) - sequence[1],
+      metric_std = sequence[length(sequence)] - sequence[1],
+      
+      #absolute difference between the metrics
+      diff_exp = abs(full_sequence[length(full_sequence)] - full_sequence[1] - (as.numeric(colnames(transition_matrix)) %*% eigenvector) - sequence[1]),
+      diff_std = abs(full_sequence[length(full_sequence)] - full_sequence[1] - (sequence[length(sequence)] - sequence[1])))
+    
+  }
+  )
+  
+  #reformat scores
+  return(data.frame(t(scores)))
+}
+  
+```
+
+Calculate and plot root mean squared errors for experiment
+```{r}
+  n_s <- c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)
+  
+  #iterate through n's
+  rmses <- sapply(n_s, function(n) {
+      
+      #obtain change-in-pain metrics for both studies
+      ldopa <- change_in_pain(pain_ldopa, n)
+      pl2 <- change_in_pain(pain_pl2, n)  
+
+
+      #calculate rmse for both metrics in both studies
+      data.frame(
+        n_s = n,
+        ldopa_rmse_exp = as.numeric(rmse(as.numeric(c(ldopa$metric_tot)), as.numeric(c(ldopa$metric_exp)))),
+        ldopa_rmse_std = as.numeric(rmse(as.numeric(c(ldopa$metric_tot)), as.numeric(c(ldopa$metric_std)))),
+                pl2_rmse_exp = as.numeric(rmse(as.numeric(c(pl2$metric_tot)), as.numeric(c(pl2$metric_exp)))),
+        pl2_rmse_std = as.numeric(rmse(as.numeric(c(pl2$metric_tot)), as.numeric(c(pl2$metric_std))))
+      )
+      
+  })
+  
+  rmses <- as.data.frame(t(rmses))
+
+  ldopa_df <- rmses %>%
+    select(n_s, ldopa_rmse_exp, ldopa_rmse_std) %>%
+    gather(key = "metrictype", value = "rmse", -n_s)
+  
+  ldopa_df <- as.data.frame(lapply(ldopa_df, unlist))
+
+  ldopa_plot <- ggplot(ldopa_df, aes(x = n_s, y = rmse)) +
+     geom_line(aes(color = metrictype, linetype = metrictype)) + 
+  scale_color_manual(values = c("darkred", "steelblue"))
+  
+  pl2_df <- rmses %>%
+    select(n_s, pl2_rmse_exp, pl2_rmse_std) %>%
+    gather(key = "metrictype", value = "rmse", -n_s)
+  
+  pl2_df <- as.data.frame(lapply(pl2_df, unlist))
+
+  pl2_plot <- ggplot(pl2_df, aes(x = n_s, y = rmse)) +
+     geom_line(aes(color = metrictype, linetype = metrictype)) + 
+  scale_color_manual(values = c("darkred", "steelblue"))
+  
+  
+  ldopa_plot + ggtitle("RMSE Between Metrics by Percen. of Seq. for LDopa") + xlab("Percentage of Sequence") + ylab("RMSE")
+  
+  ggsave("ldopa.png", width=8, height=4)
+  
+  pl2_plot + ggtitle("RMSE Between Metrics by Percen. of Seq. for PL2") + xlab("Percentage of Sequence") + ylab("RMSE")
+  
+  ggsave("pl2.png", width=8, height=4)
+
+  
+```
+
+Given the RMSEs obtained above, the usage of Markov models to model changes in pain seems promising. In Placebo II (the second chart), an apparent difference in RMSEs exist at most subset values, even as n approaches 1. At almost every point, the Markov model out-preforms the standard model. The difference of almost 0.5 in RMSE is notable, considering the metrics are calculated with data from 90% of the full sequence and the scale on which these metrics are being evaluated consists of 11 units. 
+
+RMSEs of both the Markov model and standard model are similar within the LDopa data (the first chart), indicating specific properties of the time series may specifically influence the accuracy of the model and that further simulation and analysis of this model must be done before any formal adoption or restructuring of research methods within the field. A possible direction includes accounting for temporal resolution within the time-series. Currently, models are fitted on discretely and evenly-spaced time points (pain per day), but somehow being able to transition between states 0 through 10 at non-evenly spaced time points would be beneficial. 
+
+With these considerations in mind, a goal to more accurately generalize and quantify patient outcomes within clinical trials and for patient insight still exists; with this understanding, the possibilities for understanding the nature of chronic pain conditions are vast. Characteristics of end-behavior (spread within the vector itself, the overall change in pain, etc.) can be related to clinical factors, demographic variables, etc. to understand the nature of pain trajectories. Specific types of end behavior can be explored between pain conditions to understand how the overall change in pain and total variabilities vary, and if clinical factors and demographic variables have further influences within these types of pain. Overall, we believe that the furthering of metrics to capture in pain are necessary for a better understanding of pain; without being able to properly quantify what it means for an individual's pain state to "improve", our understanding of chronic pain will be limited.
+
+In conclusion, it is fascinating that while relatively straight forward, something as seemingly "simple" as a markov model can so drastically decrease errors in predicting chronic pain. We look forward to editing our model to better predict pain but also to applying markov models to other phenomena. 
